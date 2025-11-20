@@ -87,13 +87,17 @@ or slice, got <class 'numpy.ndarray'>
 gene_expression = zarr_array[:, x_bins, y_bins].T
 ```
 
-Where `x_bins` and `y_bins` are numpy arrays. Zarr requires using `.vindex` for vectorized/fancy indexing.
+Where `x_bins` and `y_bins` are numpy arrays. Zarr arrays don't support numpy-style fancy indexing with coordinate arrays.
 
-**Fix Applied**:
+**Fix Applied** (radial_shell_encoder.py:140-141):
 ```python
-# FIXED CODE - use vindex for fancy/vectorized indexing
-gene_expression = zarr_array.vindex[:, x_bins, y_bins].T
+# FIXED CODE - convert to numpy array first to enable fancy indexing
+# Zarr's vindex doesn't support mixing slices with coordinate arrays
+zarr_np = np.asarray(zarr_array)
+gene_expression = zarr_np[:, x_bins, y_bins].T
 ```
+
+The solution converts the zarr array to a numpy array using `np.asarray()`, which then supports the fancy indexing pattern needed (mixing slice `:` with coordinate arrays `x_bins`, `y_bins`).
 
 **Test Results Before Fix**:
 - Test 1 (Encoder): ✓ Passed
@@ -109,7 +113,7 @@ gene_expression = zarr_array.vindex[:, x_bins, y_bins].T
 - Core functionality unusable
 - Integration examples would fail even if xenium_processor.py existed
 
-**Resolution**: ✅ Fixed by changing `zarr_array[:, x_bins, y_bins]` to `zarr_array.vindex[:, x_bins, y_bins]`
+**Resolution**: ✅ Fixed by converting zarr array to numpy (`np.asarray(zarr_array)`) before applying fancy indexing
 
 ---
 

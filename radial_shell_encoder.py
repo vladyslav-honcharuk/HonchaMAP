@@ -135,8 +135,10 @@ class RadialShellEncoder:
         y_bins = bin_indices[:, 1]
 
         # Get expression matrix: (n_genes, n_bins) -> transpose to (n_bins, n_genes)
-        # Use vindex for fancy/vectorized indexing with zarr arrays
-        gene_expression = zarr_array.vindex[:, x_bins, y_bins].T
+        # Convert zarr to numpy array to enable fancy indexing
+        # Zarr's vindex doesn't support mixing slices with coordinate arrays
+        zarr_np = np.asarray(zarr_array)
+        gene_expression = zarr_np[:, x_bins, y_bins].T
 
         # Create coordinates from bin indices
         bin_coords = bin_indices.astype(float) * bin_size
