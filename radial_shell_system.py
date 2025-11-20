@@ -283,7 +283,9 @@ Examples:
                              help='Number of concentric shells (default: 5)')
     build_parser.add_argument('--pca-dims', type=int, default=256,
                              help='PCA compression dimensions (default: 256)')
-    build_parser.add_argument('--use-variable-genes', type=bool, default=True,
+    build_parser.add_argument('--use-variable-genes',
+                             type=lambda x: x.lower() in ('true', '1', 'yes'),
+                             default=True,
                              help='Use only spatially variable genes (default: True)')
     build_parser.add_argument('--variable-gene-threshold', type=float, default=-2.0,
                              help='Haystack logpval_adj threshold for variable genes (default: -2.0 for p_adj<0.01)')
