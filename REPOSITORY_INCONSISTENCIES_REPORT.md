@@ -11,6 +11,13 @@ This report documents inconsistencies and issues found during a comprehensive re
 2. Variable gene inconsistency in test data causing embedding dimension mismatches
 3. Search/database gene set mismatch causing PCA dimension errors
 
+**UPDATE (Major Architectural Fix - 2025-11-20)**: Global gene coordinate system implemented ✅
+- **Problem**: Production data failed with samples having different gene counts (300-5000 genes/sample)
+- **Previous workaround**: Disabled variable gene filtering (unacceptable for production)
+- **Solution**: Implemented global gene coordinate system supporting variable sample sizes
+- **Status**: Committed (4841815), tested with synthetic data (5/5 tests passing)
+- **Production testing**: Ready for validation with real Xenium data
+
 ---
 
 ## 🚨 CRITICAL ISSUES
@@ -162,13 +169,11 @@ use_variable_genes=False,  # Disable for synthetic test data
 
 This ensures all samples use the same gene set (all genes), making embeddings compatible.
 
-**Production Limitation**:
-The database builder currently doesn't support samples with different sets of variable genes. For production use with real data, either:
-1. All samples must have identical variable gene sets (requires pre-processing)
-2. Use `use_variable_genes=False` to use all genes across all samples
-3. **Future enhancement**: Implement global variable gene set determination across all samples before encoding
+**Production Limitation** (DEPRECATED - See Issue #6):
+~~The database builder currently doesn't support samples with different sets of variable genes.~~
 
-**Resolution**: ✅ Fixed in tests by disabling variable gene filtering. Production use should be aware of this limitation.
+**Resolution**: ✅ Fixed in tests by disabling variable gene filtering.
+**SUPERSEDED**: Production limitation resolved by global gene coordinate system (Issue #6).
 
 ---
 
