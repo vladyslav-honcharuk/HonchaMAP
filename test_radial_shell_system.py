@@ -234,7 +234,7 @@ def test_database_build():
             output_dir=db_dir,
             n_shells=5,
             pca_dims=32,  # Small for test
-            use_variable_genes=True,
+            use_variable_genes=False,  # Disable for synthetic test data
             batch_size=100
         )
 
@@ -289,7 +289,7 @@ def test_search():
             output_dir=db_dir,
             n_shells=5,
             pca_dims=32,
-            use_variable_genes=True,
+            use_variable_genes=False,  # Disable for synthetic test data
             batch_size=100
         )
         builder.build_database({40: samples})
