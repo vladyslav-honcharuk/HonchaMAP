@@ -15,10 +15,11 @@ Author: XeniumMundus Project
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Set
 import h5py
 import pickle
 import logging
+import json
 from sklearn.decomposition import IncrementalPCA
 import faiss
 from tqdm import tqdm
@@ -72,6 +73,145 @@ class MultiResolutionDatabaseBuilder:
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
+    def _discover_global_genes(
+        self,
+        sample_paths: List[Path]
+    ) -> Tuple[List[str], Optional[np.ndarray]]:
+        """
+        Discover all unique genes across samples and determine global gene set.
+
+        Returns:
+        --------
+        Tuple of:
+        - List of gene names in sorted order (global gene coordinate system)
+        - Optional boolean mask indicating which genes are spatially variable
+        """
+        self.logger.info("\n[Gene Discovery] Building global gene coordinate system...")
+
+        # Step 1: Collect all genes from all samples
+        all_genes_per_sample = []
+        variable_genes_per_sample = []
+
+        for sample_path in tqdm(sample_paths, desc="Reading gene lists"):
+            # Read genes.csv
+            genes_file = sample_path / "genes.csv"
+            if genes_file.exists():
+                with open(genes_file, 'r') as f:
+                    genes = [line.strip() for line in f if line.strip()]
+                all_genes_per_sample.append(set(genes))
+            else:
+                self.logger.warning(f"No genes.csv found in {sample_path.name}, skipping")
+                continue
+
+            # If using variable genes, read haystack results
+            if self.use_variable_genes:
+                haystack_file = sample_path / "haystack_results.csv"
+                if haystack_file.exists():
+                    try:
+                        df = pd.read_csv(haystack_file, index_col=0)
+                        if 'logpval_adj' in df.columns:
+                            # Get variable genes (default threshold -2.0 = p_adj < 0.01)
+                            var_genes = set(df[df['logpval_adj'] <= -2.0].index.tolist())
+                            variable_genes_per_sample.append(var_genes)
+                        else:
+                            self.logger.warning(f"No logpval_adj in haystack for {sample_path.name}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to read haystack for {sample_path.name}: {e}")
+
+        if not all_genes_per_sample:
+            raise ValueError("No genes.csv files found in any sample")
+
+        # Step 2: Build union of all genes
+        all_genes_union = set.union(*all_genes_per_sample)
+        self.logger.info(f"Total unique genes across all samples: {len(all_genes_union)}")
+
+        # Step 3: Determine global gene set
+        global_genes = sorted(list(all_genes_union))  # Sort for consistent ordering
+        global_gene_mask = None
+
+        if self.use_variable_genes and variable_genes_per_sample:
+            # Use intersection of variable genes (genes that are variable in ALL samples)
+            # This is conservative but ensures consistency
+            variable_genes_intersection = set.intersection(*variable_genes_per_sample)
+
+            # If intersection is too small, use union (genes variable in ANY sample)
+            if len(variable_genes_intersection) < 50:
+                self.logger.warning(
+                    f"Variable gene intersection only {len(variable_genes_intersection)} genes. "
+                    f"Using union instead."
+                )
+                variable_genes_union = set.union(*variable_genes_per_sample)
+                variable_genes_global = variable_genes_union
+            else:
+                variable_genes_global = variable_genes_intersection
+
+            # Create boolean mask
+            global_gene_mask = np.array([g in variable_genes_global for g in global_genes])
+            n_variable = global_gene_mask.sum()
+            self.logger.info(
+                f"Using {n_variable}/{len(global_genes)} "
+                f"({100*n_variable/len(global_genes):.1f}%) spatially variable genes"
+            )
+        else:
+            self.logger.info(f"Using all {len(global_genes)} genes")
+
+        return global_genes, global_gene_mask
+
+    def _create_gene_mapping(
+        self,
+        sample_genes: List[str],
+        global_genes: List[str]
+    ) -> np.ndarray:
+        """
+        Create mapping from sample gene indices to global gene indices.
+
+        Returns:
+        --------
+        Array of shape (n_sample_genes,) where each element is the index
+        in global_genes, or -1 if gene not in global set.
+        """
+        global_gene_to_idx = {gene: idx for idx, gene in enumerate(global_genes)}
+        mapping = np.array([global_gene_to_idx.get(g, -1) for g in sample_genes])
+        return mapping
+
+    def _encode_patch_global(
+        self,
+        global_z: np.ndarray,
+        selected_bins: np.ndarray,
+        bin_size: int,
+        global_gene_mask: Optional[np.ndarray]
+    ) -> np.ndarray:
+        """
+        Encode a patch using global gene coordinate system.
+
+        Parameters:
+        -----------
+        global_z : np.ndarray
+            Expression array in global coordinate system, shape (n_global_genes, width, height)
+        selected_bins : np.ndarray
+            Bin indices for this patch, shape (n_bins, 2)
+        bin_size : int
+            Bin size in micrometers
+        global_gene_mask : Optional[np.ndarray]
+            Boolean mask for spatially variable genes in global space
+
+        Returns:
+        --------
+        np.ndarray: Encoded features
+        """
+        # Extract expression values for selected bins
+        x_bins = selected_bins[:, 0]
+        y_bins = selected_bins[:, 1]
+
+        # Get expression matrix: (n_global_genes, n_bins) -> transpose to (n_bins, n_global_genes)
+        gene_expression = global_z[:, x_bins, y_bins].T
+
+        # Create coordinates from bin indices
+        bin_coords = selected_bins.astype(float) * bin_size
+
+        # Encode using radial shell encoder
+        return self.encoder.encode_patch(bin_coords, gene_expression, global_gene_mask)
+
     def build_database(
         self,
         samples_by_resolution: Dict[int, List[Path]],
@@ -115,12 +255,18 @@ class MultiResolutionDatabaseBuilder:
         resolution_dir = self.output_dir / f"{resolution_um}um"
         resolution_dir.mkdir(parents=True, exist_ok=True)
 
+        # Phase 0: Discover global gene coordinate system
+        self.logger.info("\n[Phase 0/3] Discovering global gene coordinate system...")
+        global_genes, global_gene_mask = self._discover_global_genes(sample_paths)
+
         # Phase 1: Generate patches and raw embeddings
         self.logger.info("\n[Phase 1/3] Generating patches and raw embeddings...")
         raw_embeddings_by_radius, metadata = self._generate_raw_embeddings(
             sample_paths,
             resolution_um,
-            bin_size
+            bin_size,
+            global_genes,
+            global_gene_mask
         )
 
         if not raw_embeddings_by_radius:
@@ -132,6 +278,22 @@ class MultiResolutionDatabaseBuilder:
         metadata_path = resolution_dir / "patches_metadata.parquet"
         metadata_df.to_parquet(metadata_path, index=False)
         self.logger.info(f"Saved metadata: {len(metadata_df):,} patches")
+
+        # Save global gene list and configuration
+        config = {
+            'global_genes': global_genes,
+            'use_variable_genes': self.use_variable_genes,
+            'n_shells': self.n_shells,
+            'pca_dims': self.pca_dims,
+            'resolution_um': resolution_um
+        }
+        if global_gene_mask is not None:
+            config['variable_gene_indices'] = np.where(global_gene_mask)[0].tolist()
+
+        config_path = resolution_dir / "config.json"
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=2)
+        self.logger.info(f"Saved configuration with {len(global_genes)} global genes")
 
         # Phase 2: Fit PCA
         self.logger.info("\n[Phase 2/3] Fitting PCA...")
@@ -159,10 +321,19 @@ class MultiResolutionDatabaseBuilder:
         self,
         sample_paths: List[Path],
         resolution_um: int,
-        bin_size: int
+        bin_size: int,
+        global_genes: List[str],
+        global_gene_mask: Optional[np.ndarray]
     ) -> Tuple[Dict[int, Dict], List[Dict]]:
         """
         Generate patches and compute raw embeddings for all samples.
+
+        Parameters:
+        -----------
+        global_genes : List[str]
+            Ordered list of all genes in global coordinate system
+        global_gene_mask : Optional[np.ndarray]
+            Boolean mask for spatially variable genes in global space
 
         Returns:
         --------
@@ -213,11 +384,30 @@ class MultiResolutionDatabaseBuilder:
                     store.close()
                     continue
 
-                # Load spatially variable genes if requested
-                variable_gene_mask = None
-                if self.use_variable_genes:
-                    haystack_file = sample_path / "haystack_results.csv"
-                    variable_gene_mask = load_variable_genes(haystack_file)
+                # Load sample genes and create mapping to global genes
+                genes_file = sample_path / "genes.csv"
+                if not genes_file.exists():
+                    self.logger.warning(f"No genes.csv for {sample_id}, skipping")
+                    store.close()
+                    continue
+
+                with open(genes_file, 'r') as f:
+                    sample_genes = [line.strip() for line in f if line.strip()]
+
+                # Create mapping from sample genes to global genes
+                gene_mapping = self._create_gene_mapping(sample_genes, global_genes)
+
+                # Convert zarr to numpy and remap to global coordinate system
+                # z shape: (n_sample_genes, width, height)
+                # We need to create global_z: (n_global_genes, width, height)
+                zarr_np = np.asarray(z)
+                n_global_genes = len(global_genes)
+                global_z = np.zeros((n_global_genes, width, height), dtype=zarr_np.dtype)
+
+                # Map sample genes to global positions
+                for sample_idx, global_idx in enumerate(gene_mapping):
+                    if global_idx >= 0:  # Gene exists in global set
+                        global_z[global_idx] = zarr_np[sample_idx]
 
                 # Generate patches
                 patches = patch_generator.generate_patches(
@@ -230,12 +420,12 @@ class MultiResolutionDatabaseBuilder:
                     # Get bin indices for this patch
                     selected_bins = bin_coords[patch['bin_indices']]
 
-                    # Encode patch
-                    embedding = self.encoder.encode_from_zarr(
-                        z,
+                    # Encode patch using global gene space
+                    embedding = self._encode_patch_global(
+                        global_z,
                         selected_bins,
                         bin_size,
-                        variable_gene_mask
+                        global_gene_mask
                     )
 
                     radius = patch['radius']

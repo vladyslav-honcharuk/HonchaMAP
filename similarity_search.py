@@ -16,6 +16,7 @@ import pickle
 import faiss
 import h5py
 import logging
+import json
 import zarr
 
 from radial_shell_encoder import (
@@ -51,6 +52,7 @@ class MultiResolutionSpatialSearch:
         self.indices = {}
         self.pca_models = {}
         self.embeddings = {}
+        self.configs = {}  # Store config.json per resolution
 
         # Available resolutions
         self.resolutions = self._detect_resolutions()
@@ -112,6 +114,18 @@ class MultiResolutionSpatialSearch:
                 self.pca_models[resolution_um] = pickle.load(f)
             self.logger.info(f"Loaded PCA model for {resolution_um}μm")
 
+        # Load configuration (once per resolution)
+        if resolution_um not in self.configs:
+            config_path = resolution_dir / "config.json"
+            if config_path.exists():
+                with open(config_path, 'r') as f:
+                    self.configs[resolution_um] = json.load(f)
+                n_genes = len(self.configs[resolution_um].get('global_genes', []))
+                self.logger.info(f"Loaded config for {resolution_um}μm: {n_genes} global genes")
+            else:
+                self.logger.warning(f"No config.json found for {resolution_um}μm - using legacy mode")
+                self.configs[resolution_um] = None
+
         # Load FAISS index
         index_path = resolution_dir / f"faiss_indices/faiss_r{radius}.index"
         if not index_path.exists():
@@ -130,6 +144,94 @@ class MultiResolutionSpatialSearch:
                     'embeddings': f['embeddings'][:],
                     'patch_ids': [pid.decode() for pid in f['patch_ids'][:]]
                 }
+
+    def _encode_query_global(
+        self,
+        sample_path: Path,
+        z: zarr.Array,
+        selected_bins: np.ndarray,
+        bin_size: int,
+        resolution_um: int
+    ) -> np.ndarray:
+        """
+        Encode query patch using global gene coordinate system.
+
+        Parameters:
+        -----------
+        sample_path : Path
+            Path to sample directory
+        z : zarr.Array
+            Zarr expression array for sample
+        selected_bins : np.ndarray
+            Selected bin indices, shape (n_bins, 2)
+        bin_size : int
+            Bin size in micrometers
+        resolution_um : int
+            Resolution to use (for loading config)
+
+        Returns:
+        --------
+        np.ndarray: Encoded query embedding
+        """
+        # Ensure config is loaded for this resolution
+        if resolution_um not in self.configs:
+            # Trigger loading by calling _load_resolution with any radius
+            # (config is loaded per resolution, not per radius)
+            available_radii = PatchGenerator(resolution_um).radii
+            if available_radii:
+                self._load_resolution(resolution_um, available_radii[0])
+
+        config = self.configs.get(resolution_um)
+
+        if config is None:
+            # Legacy mode - no global genes, use old method
+            self.logger.warning("Using legacy encoding (no global gene system)")
+            encoder = RadialShellEncoder(n_shells=self.n_shells)
+            return encoder.encode_from_zarr(z, selected_bins, bin_size, None)
+
+        # Get global genes from config
+        global_genes = config['global_genes']
+        n_global_genes = len(global_genes)
+
+        # Get global gene mask if using variable genes
+        global_gene_mask = None
+        if 'variable_gene_indices' in config:
+            global_gene_mask = np.zeros(n_global_genes, dtype=bool)
+            global_gene_mask[config['variable_gene_indices']] = True
+
+        # Load sample genes
+        genes_file = sample_path / "genes.csv"
+        if not genes_file.exists():
+            raise FileNotFoundError(f"genes.csv not found in {sample_path}")
+
+        with open(genes_file, 'r') as f:
+            sample_genes = [line.strip() for line in f if line.strip()]
+
+        # Create mapping from sample genes to global genes
+        global_gene_to_idx = {gene: idx for idx, gene in enumerate(global_genes)}
+        gene_mapping = np.array([global_gene_to_idx.get(g, -1) for g in sample_genes])
+
+        # Convert zarr to numpy and remap to global coordinate system
+        zarr_np = np.asarray(z)
+        n_genes, width, height = zarr_np.shape
+        global_z = np.zeros((n_global_genes, width, height), dtype=zarr_np.dtype)
+
+        # Map sample genes to global positions
+        for sample_idx, global_idx in enumerate(gene_mapping):
+            if global_idx >= 0:  # Gene exists in global set
+                global_z[global_idx] = zarr_np[sample_idx]
+
+        # Extract expression for selected bins
+        x_bins = selected_bins[:, 0]
+        y_bins = selected_bins[:, 1]
+        gene_expression = global_z[:, x_bins, y_bins].T  # (n_bins, n_global_genes)
+
+        # Create coordinates from bin indices
+        bin_coords = selected_bins.astype(float) * bin_size
+
+        # Encode using radial shell encoder
+        encoder = RadialShellEncoder(n_shells=self.n_shells)
+        return encoder.encode_patch(bin_coords, gene_expression, global_gene_mask)
 
     def search_from_coordinates(
         self,
@@ -221,22 +323,14 @@ class MultiResolutionSpatialSearch:
         search_radius = auto_select_radius(n_query_bins, resolution_um)
         self.logger.info(f"Auto-selected search radius: {search_radius} bins")
 
-        # Load spatially variable genes
-        # NOTE: Disabled - must match database build settings
-        # TODO: Save use_variable_genes flag in database metadata
-        variable_gene_mask = None
-        # haystack_file = sample_path / "haystack_results.csv"
-        # if haystack_file.exists():
-        #     variable_gene_mask = load_variable_genes(haystack_file)
-
-        # Compute query embedding
+        # Compute query embedding using global gene coordinate system
         self.logger.info("\n[1/4] Computing query embedding...")
-        encoder = RadialShellEncoder(n_shells=self.n_shells)
-        query_embedding = encoder.encode_from_zarr(
+        query_embedding = self._encode_query_global(
+            sample_path,
             z,
             selected_bins,
             bin_size,
-            variable_gene_mask
+            resolution_um
         )
 
         store.close()
@@ -349,22 +443,14 @@ class MultiResolutionSpatialSearch:
         search_radius = auto_select_radius(n_query_bins, resolution_um)
         self.logger.info(f"Auto-selected search radius: {search_radius} bins")
 
-        # Load spatially variable genes
-        # NOTE: Disabled - must match database build settings
-        # TODO: Save use_variable_genes flag in database metadata
-        variable_gene_mask = None
-        # haystack_file = sample_path / "haystack_results.csv"
-        # if haystack_file.exists():
-        #     variable_gene_mask = load_variable_genes(haystack_file)
-
-        # Compute query embedding
+        # Compute query embedding using global gene coordinate system
         self.logger.info("\n[1/4] Computing query embedding...")
-        encoder = RadialShellEncoder(n_shells=self.n_shells)
-        query_embedding = encoder.encode_from_zarr(
+        query_embedding = self._encode_query_global(
+            sample_path,
             z,
             selected_bins,
             bin_size,
-            variable_gene_mask
+            resolution_um
         )
 
         store.close()
