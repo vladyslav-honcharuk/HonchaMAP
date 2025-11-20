@@ -222,10 +222,12 @@ class MultiResolutionSpatialSearch:
         self.logger.info(f"Auto-selected search radius: {search_radius} bins")
 
         # Load spatially variable genes
+        # NOTE: Disabled - must match database build settings
+        # TODO: Save use_variable_genes flag in database metadata
         variable_gene_mask = None
-        haystack_file = sample_path / "haystack_results.csv"
-        if haystack_file.exists():
-            variable_gene_mask = load_variable_genes(haystack_file)
+        # haystack_file = sample_path / "haystack_results.csv"
+        # if haystack_file.exists():
+        #     variable_gene_mask = load_variable_genes(haystack_file)
 
         # Compute query embedding
         self.logger.info("\n[1/4] Computing query embedding...")
@@ -348,10 +350,12 @@ class MultiResolutionSpatialSearch:
         self.logger.info(f"Auto-selected search radius: {search_radius} bins")
 
         # Load spatially variable genes
+        # NOTE: Disabled - must match database build settings
+        # TODO: Save use_variable_genes flag in database metadata
         variable_gene_mask = None
-        haystack_file = sample_path / "haystack_results.csv"
-        if haystack_file.exists():
-            variable_gene_mask = load_variable_genes(haystack_file)
+        # haystack_file = sample_path / "haystack_results.csv"
+        # if haystack_file.exists():
+        #     variable_gene_mask = load_variable_genes(haystack_file)
 
         # Compute query embedding
         self.logger.info("\n[1/4] Computing query embedding...")

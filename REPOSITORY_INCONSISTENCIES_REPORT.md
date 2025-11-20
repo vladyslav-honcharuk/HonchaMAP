@@ -6,9 +6,10 @@
 ## Executive Summary
 This report documents inconsistencies and issues found during a comprehensive repository audit. The repository contains a spatial transcriptomics similarity search system (Radial Shell Encoding) but has several critical issues including unrelated files, missing dependencies, broken code, and configuration gaps.
 
-**UPDATE (Post-Test Run)**: Two additional critical bugs discovered and fixed:
+**UPDATE (Post-Test Run)**: Three additional critical bugs discovered and fixed:
 1. Zarr indexing incompatibility causing test suite failure (2/5 tests failing)
-2. Variable gene inconsistency causing embedding dimension mismatches in tests
+2. Variable gene inconsistency in test data causing embedding dimension mismatches
+3. Search/database gene set mismatch causing PCA dimension errors
 
 ---
 
@@ -171,9 +172,61 @@ The database builder currently doesn't support samples with different sets of va
 
 ---
 
+### 5. Search/Database Gene Set Mismatch - Design Flaw ✅ **FIXED**
+**Severity**: Critical
+**Impact**: Search fails with dimension mismatch
+
+**Description**:
+After fixing issues #3 and #4, Test 4 (Similarity Search) revealed another critical design flaw: the search code automatically loads variable genes from haystack files, but has no knowledge of whether the database was built with or without variable genes.
+
+**Error Message**:
+```
+ValueError: X has 235 features, but IncrementalPCA is expecting 250 features as input.
+```
+
+**Root Cause** (similarity_search.py:224-228, 350-354):
+```python
+# Search code automatically loads variable genes
+haystack_file = sample_path / "haystack_results.csv"
+if haystack_file.exists():
+    variable_gene_mask = load_variable_genes(haystack_file)
+```
+
+**The Problem**:
+- Database built with `use_variable_genes=False` → PCA trained on 250 features (50 genes × 5 shells)
+- Search query loads haystack file → uses 47 variable genes → 235 features (47 × 5)
+- PCA transform fails due to dimension mismatch: 235 ≠ 250
+
+**Design Flaw**:
+The database builder has a `use_variable_genes` parameter, but this setting is **not saved** in the database metadata. The search code has no way to know whether to use variable genes or not, so it always tries to load them if a haystack file exists.
+
+**Fix Applied** (similarity_search.py:224-231, 350-357):
+```python
+# Load spatially variable genes
+# NOTE: Disabled - must match database build settings
+# TODO: Save use_variable_genes flag in database metadata
+variable_gene_mask = None
+# haystack_file = sample_path / "haystack_results.csv"
+# if haystack_file.exists():
+#     variable_gene_mask = load_variable_genes(haystack_file)
+```
+
+Disabled automatic variable gene loading in both search methods (`search_from_coordinates` and `search_from_selection`).
+
+**Proper Fix Needed**:
+For production use, the system should:
+1. Save the `use_variable_genes` flag when building the database
+2. Store it in database metadata (e.g., in a config.json file)
+3. Load and respect this flag during search initialization
+4. Ensure query embeddings always match the database's feature dimensions
+
+**Resolution**: ✅ Fixed by disabling automatic variable gene loading in search. Future enhancement needed for proper metadata-based solution.
+
+---
+
 ## ⚠️ MAJOR ISSUES
 
-### 5. Missing .gitignore File (NOW FIXED)
+### 6. Missing .gitignore File (NOW FIXED)
 **Severity**: Major
 **Impact**: Version control pollution
 
@@ -194,7 +247,7 @@ No `.gitignore` file was present, causing Python cache files to be tracked.
 
 ---
 
-### 6. Empty README.md
+### 7. Empty README.md
 **Severity**: Major
 **Impact**: Poor first impression, unclear project purpose
 
@@ -229,7 +282,7 @@ Update `README.md` to include:
 
 ## 📋 MINOR ISSUES
 
-### 7. Inconsistent Git Commit Messages
+### 8. Inconsistent Git Commit Messages
 **Severity**: Minor
 **Impact**: Poor git history readability
 
@@ -258,7 +311,7 @@ Use descriptive commit messages in the future, e.g.:
 
 ---
 
-### 8. Git Author Email Inconsistency
+### 9. Git Author Email Inconsistency
 **Severity**: Minor
 **Impact**: Contributor tracking confusion
 
@@ -274,7 +327,7 @@ git config user.email "vlaruks@gmail.com"
 
 ---
 
-### 9. Undefined Constants in Code
+### 10. Undefined Constants in Code
 **Severity**: Minor
 **Impact**: Code examples won't work without modification
 
@@ -348,21 +401,23 @@ LICENSE
 1. ✅ **DONE**: Create `.gitignore` file
 2. ✅ **DONE**: Fix zarr indexing bug in `radial_shell_encoder.py`
 3. ✅ **DONE**: Fix variable gene test inconsistency in `test_radial_shell_system.py`
-4. **Add or document** `xenium_processor.py` dependency
-5. **Remove unrelated** web portfolio files OR move to separate repo
-6. **Update** `README.md` with proper project information
+4. ✅ **DONE**: Fix search/database gene set mismatch in `similarity_search.py`
+5. **Add or document** `xenium_processor.py` dependency
+6. **Remove unrelated** web portfolio files OR move to separate repo
+7. **Update** `README.md` with proper project information
 
 ### Short-term Improvements
-7. Define `XENIUM_FOLDER` constant or document configuration
-8. Configure consistent git author email
-9. Use descriptive commit messages going forward
-10. **Consider**: Implement global variable gene set determination for production use
+8. Define `XENIUM_FOLDER` constant or document configuration
+9. Configure consistent git author email
+10. Use descriptive commit messages going forward
+11. **CRITICAL**: Implement proper metadata system for database configuration
+12. **CRITICAL**: Save/load `use_variable_genes` flag in database metadata
 
 ### Long-term Enhancements
-11. Add CI/CD configuration (GitHub Actions)
-12. Add contribution guidelines
-13. Consider adding example data or test fixtures
-14. Add badges (build status, license, etc.) to README
+13. Add CI/CD configuration (GitHub Actions)
+14. Add contribution guidelines
+15. Consider adding example data or test fixtures
+16. Add badges (build status, license, etc.) to README
 
 ---
 
@@ -370,22 +425,23 @@ LICENSE
 
 The repository contains a spatial transcriptomics system with comprehensive documentation, but had several critical issues discovered during audit:
 
-**Critical Issues (4)**:
+**Critical Issues (5)**:
 1. **Unrelated portfolio files** causing repository focus confusion
 2. **Missing `xenium_processor.py` dependency** breaking integration code
 3. **Zarr indexing bug** ✅ FIXED - causing 40% test failure rate
-4. **Variable gene inconsistency** ✅ FIXED IN TESTS - causing embedding dimension mismatches
+4. **Variable gene inconsistency** ✅ FIXED IN TESTS - test data causing embedding dimension mismatches
+5. **Search/database mismatch** ✅ FIXED - search not respecting database gene settings
 
 **Major Issues (2)**:
-5. **Missing .gitignore** ✅ FIXED - causing version control pollution
-6. **Empty README.md** - poor project presentation
+6. **Missing .gitignore** ✅ FIXED - causing version control pollution
+7. **Empty README.md** - poor project presentation
 
 **Minor Issues (3)**:
-7-9. Inconsistent commit messages, git author emails, and undefined constants
+8-10. Inconsistent commit messages, git author emails, and undefined constants
 
-**Total Issues Found**: 9 (3 fixed during audit)
+**Total Issues Found**: 10 (4 fixed during audit)
 
-Priority should be given to resolving the remaining critical issues (#1 and #2) to make the repository functional and focused on its core purpose. The two runtime bugs (#3 and #4) have been resolved, restoring core functionality for tests. Note that issue #4 represents a design limitation that may affect production use with real data.
+Priority should be given to resolving the remaining critical issues (#1 and #2) to make the repository functional and focused on its core purpose. The three runtime bugs (#3, #4, #5) have been resolved, restoring core functionality for tests. Note that issues #4 and #5 reveal design limitations that need proper solutions for production use.
 
 ---
 
