@@ -73,6 +73,7 @@ def build_database(args):
         n_shells=args.n_shells,
         pca_dims=args.pca_dims,
         use_variable_genes=args.use_variable_genes,
+        variable_gene_threshold=args.variable_gene_threshold,
         batch_size=args.batch_size
     )
 
@@ -284,6 +285,8 @@ Examples:
                              help='PCA compression dimensions (default: 256)')
     build_parser.add_argument('--use-variable-genes', type=bool, default=True,
                              help='Use only spatially variable genes (default: True)')
+    build_parser.add_argument('--variable-gene-threshold', type=float, default=-2.0,
+                             help='Haystack logpval_adj threshold for variable genes (default: -2.0 for p_adj<0.01)')
     build_parser.add_argument('--batch-size', type=int, default=10000,
                              help='Batch size for PCA fitting (default: 10000)')
 

@@ -43,6 +43,7 @@ class MultiResolutionDatabaseBuilder:
         n_shells: int = 5,
         pca_dims: int = 256,
         use_variable_genes: bool = True,
+        variable_gene_threshold: float = -2.0,
         batch_size: int = 10000
     ):
         """
@@ -58,6 +59,8 @@ class MultiResolutionDatabaseBuilder:
             PCA compression dimensions
         use_variable_genes : bool
             Whether to use only spatially variable genes
+        variable_gene_threshold : float
+            Haystack logpval_adj threshold for variable genes (default: -2.0 for p_adj < 0.01)
         batch_size : int
             Batch size for PCA fitting
         """
@@ -65,6 +68,7 @@ class MultiResolutionDatabaseBuilder:
         self.n_shells = n_shells
         self.pca_dims = pca_dims
         self.use_variable_genes = use_variable_genes
+        self.variable_gene_threshold = variable_gene_threshold
         self.batch_size = batch_size
 
         self.encoder = RadialShellEncoder(n_shells=n_shells)
@@ -110,8 +114,8 @@ class MultiResolutionDatabaseBuilder:
                     try:
                         df = pd.read_csv(haystack_file, index_col=0)
                         if 'logpval_adj' in df.columns:
-                            # Get variable genes (default threshold -2.0 = p_adj < 0.01)
-                            var_genes = set(df[df['logpval_adj'] <= -2.0].index.tolist())
+                            # Get variable genes using configured threshold
+                            var_genes = set(df[df['logpval_adj'] <= self.variable_gene_threshold].index.tolist())
                             variable_genes_per_sample.append(var_genes)
                         else:
                             self.logger.warning(f"No logpval_adj in haystack for {sample_path.name}")
@@ -145,13 +149,22 @@ class MultiResolutionDatabaseBuilder:
             else:
                 variable_genes_global = variable_genes_intersection
 
-            # Create boolean mask
-            global_gene_mask = np.array([g in variable_genes_global for g in global_genes])
-            n_variable = global_gene_mask.sum()
-            self.logger.info(
-                f"Using {n_variable}/{len(global_genes)} "
-                f"({100*n_variable/len(global_genes):.1f}%) spatially variable genes"
-            )
+            # Final fallback: if still no variable genes found, use all genes
+            if len(variable_genes_global) == 0:
+                self.logger.warning(
+                    f"No spatially variable genes found in haystack files "
+                    f"(threshold: logpval_adj <= {self.variable_gene_threshold}). "
+                    f"Falling back to using all genes."
+                )
+                global_gene_mask = None
+            else:
+                # Create boolean mask
+                global_gene_mask = np.array([g in variable_genes_global for g in global_genes])
+                n_variable = global_gene_mask.sum()
+                self.logger.info(
+                    f"Using {n_variable}/{len(global_genes)} "
+                    f"({100*n_variable/len(global_genes):.1f}%) spatially variable genes"
+                )
         else:
             self.logger.info(f"Using all {len(global_genes)} genes")
 
