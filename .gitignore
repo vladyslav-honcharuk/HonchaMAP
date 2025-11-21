@@ -57,3 +57,14 @@ htmlcov/
 *.tmp
 *.bak
 .cache/
+
+# Generated plots and visualizations
+test_plots/
+plots/
+database_plots/
+database_visualizations/
+*_plots/
+*.png
+*.jpg
+*.jpeg
+*.pdf
