@@ -219,11 +219,21 @@ def main():
     samples = [d for d in data_dir.iterdir() if d.is_dir() and (d / "zarr").exists()]
     query_sample = samples[0]
 
-    print(f"Query sample: {query_sample.name}")
-    print(f"Query location: (50, 50)")
-    print(f"Query radius: {RADIUS} bins")
-
     sample_genes, expression = load_sample(query_sample)
+    n_genes, width, height = expression.shape
+
+    # Find a valid query location (center of tissue with some expression)
+    query_x = width // 2
+    query_y = height // 2
+
+    # Make sure we're within bounds
+    query_x = max(RADIUS + 5, min(query_x, width - RADIUS - 5))
+    query_y = max(RADIUS + 5, min(query_y, height - RADIUS - 5))
+
+    print(f"Query sample: {query_sample.name}")
+    print(f"Query location: ({query_x}, {query_y})")
+    print(f"Query radius: {RADIUS} bins")
+    print(f"Tissue size: {width} x {height} bins")
 
     # Map to global genes
     global_expr = np.zeros((len(genes), expression.shape[1], expression.shape[2]), dtype=expression.dtype)
@@ -233,7 +243,7 @@ def main():
             global_expr[idx] = expression[i]
 
     # Extract query patch
-    result = extract_patch(global_expr, 50, 50, RADIUS)
+    result = extract_patch(global_expr, query_x, query_y, RADIUS)
     if result is None:
         print("Failed to create query!")
         return
