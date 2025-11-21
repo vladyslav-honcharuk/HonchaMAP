@@ -254,6 +254,17 @@ def main():
     print(f"Query encoding: {len(query_encoding)} features ({len(genes)} genes × {N_SHELLS} rings)")
     print()
 
+    # Show query encoding details
+    print("\nQuery Encoding (first 3 genes):")
+    print("-"*60)
+    for gene_idx in range(min(3, len(genes))):
+        gene_name = genes[gene_idx]
+        gene_features = query_encoding[gene_idx * N_SHELLS : (gene_idx + 1) * N_SHELLS]
+        print(f"{gene_name:10s}: [", end="")
+        print(", ".join([f"{v:5.2f}" for v in gene_features]), end="")
+        print("]  (ring 1→5: center→edge)")
+    print()
+
     # Search
     print("Searching...")
     print("-"*60)
@@ -262,6 +273,47 @@ def main():
     print("\nTop 10 matches:")
     for i, r in enumerate(results):
         print(f"{i+1:2d}. {r['sample']:12s} ({r['x']:3d}, {r['y']:3d})  similarity: {r['similarity']:.3f}")
+
+    # Show detailed comparison for top match (if not the query itself)
+    if len(results) > 1:
+        print("\n" + "="*60)
+        print("DETAILED COMPARISON: Query vs Top Match")
+        print("="*60)
+
+        top_match = results[1] if results[0]['similarity'] > 0.99 else results[0]
+
+        # Find the match in database
+        match_encoding = None
+        for entry in database:
+            if (entry['sample'] == top_match['sample'] and
+                entry['x'] == top_match['x'] and
+                entry['y'] == top_match['y']):
+                match_encoding = entry['encoding']
+                break
+
+        if match_encoding is not None:
+            print(f"\nQuery:     {query_sample.name} at ({query_x}, {query_y})")
+            print(f"Match:     {top_match['sample']} at ({top_match['x']}, {top_match['y']})")
+            print(f"Similarity: {top_match['similarity']:.3f}\n")
+
+            print("Gene expression comparison (first 5 genes, ring 1→5):")
+            print("-"*80)
+            print(f"{'Gene':<12s} | {'Query Rings':<30s} | {'Match Rings':<30s}")
+            print("-"*80)
+
+            for gene_idx in range(min(5, len(genes))):
+                gene_name = genes[gene_idx]
+                query_rings = query_encoding[gene_idx * N_SHELLS : (gene_idx + 1) * N_SHELLS]
+                match_rings = match_encoding[gene_idx * N_SHELLS : (gene_idx + 1) * N_SHELLS]
+
+                query_str = " ".join([f"{v:5.2f}" for v in query_rings])
+                match_str = " ".join([f"{v:5.2f}" for v in match_rings])
+
+                print(f"{gene_name:<12s} | {query_str:<30s} | {match_str:<30s}")
+
+            print("-"*80)
+            print("(Numbers show average gene expression in each ring)")
+            print("(Ring 1 = center, Ring 5 = edge)")
 
     print()
     print("="*60)
