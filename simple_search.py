@@ -16,6 +16,7 @@ import zarr
 from pathlib import Path
 from scipy.spatial.distance import cosine
 import argparse
+import matplotlib.pyplot as plt
 
 # Configuration
 RADIUS = 5  # patch radius in bins
@@ -192,6 +193,155 @@ def search(query_encoding, database, top_k=10):
 
 
 # ============================================================================
+# STEP 5: Visualize spatial data
+# ============================================================================
+
+def visualize_matches_spatial(data_dir, query_sample_name, query_x, query_y,
+                               results, genes, gene_name='ACTA2', radius=5, n_show=4):
+    """
+    Visualize original spatial gene expression for query and top matches.
+
+    Shows actual tissue bin locations (not circular patches) with gene expression as color.
+    """
+    # Find gene index
+    if gene_name not in genes:
+        print(f"Gene {gene_name} not in database. Using first gene: {genes[0]}")
+        gene_name = genes[0]
+
+    gene_idx = genes.index(gene_name)
+
+    # Prepare subplots: query + top matches
+    n_show = min(n_show, len(results) + 1)
+    fig, axes = plt.subplots(1, n_show, figsize=(5*n_show, 5))
+    if n_show == 1:
+        axes = [axes]
+
+    # Plot query
+    print(f"\nCreating spatial visualization for gene: {gene_name}")
+    print("-"*60)
+
+    query_path = data_dir / query_sample_name
+    sample_genes, expression = load_sample(query_path)
+
+    # Map to global genes
+    gene_map = {g: i for i, g in enumerate(genes)}
+    global_expr = np.zeros((len(genes), expression.shape[1], expression.shape[2]))
+    for i, gene in enumerate(sample_genes):
+        if gene in gene_map:
+            global_expr[gene_map[gene]] = expression[i]
+
+    # Extract patch region (not just circular, but square around it for context)
+    margin = radius + 3
+    x_min = max(0, query_x - margin)
+    x_max = min(global_expr.shape[1], query_x + margin)
+    y_min = max(0, query_y - margin)
+    y_max = min(global_expr.shape[2], query_y + margin)
+
+    # Get all bins in region
+    x_coords_all = []
+    y_coords_all = []
+    expression_vals = []
+
+    for x in range(x_min, x_max):
+        for y in range(y_min, y_max):
+            x_coords_all.append(x)
+            y_coords_all.append(y)
+            expression_vals.append(global_expr[gene_idx, x, y])
+
+    x_coords_all = np.array(x_coords_all)
+    y_coords_all = np.array(y_coords_all)
+    expression_vals = np.array(expression_vals)
+
+    # Plot query
+    ax = axes[0]
+    scatter = ax.scatter(x_coords_all, y_coords_all, c=expression_vals,
+                        cmap='YlOrRd', s=50, alpha=0.7, edgecolors='black', linewidth=0.5)
+
+    # Mark the patch center
+    ax.scatter([query_x], [query_y], c='blue', s=200, marker='x', linewidths=3, label='Center')
+
+    # Draw circle showing patch radius
+    circle = plt.Circle((query_x, query_y), radius, color='blue', fill=False, linewidth=2, linestyle='--')
+    ax.add_patch(circle)
+
+    ax.set_title(f'QUERY\n{query_sample_name}\n({query_x}, {query_y})', fontsize=10, fontweight='bold')
+    ax.set_xlabel('X coordinate (bins)')
+    ax.set_ylabel('Y coordinate (bins)')
+    ax.set_aspect('equal')
+    ax.grid(True, alpha=0.3)
+    plt.colorbar(scatter, ax=ax, label=f'{gene_name} expression')
+
+    print(f"Query: {query_sample_name} at ({query_x}, {query_y})")
+
+    # Plot top matches
+    for idx, result in enumerate(results[:n_show-1]):
+        ax = axes[idx + 1]
+
+        # Load match sample
+        match_path = data_dir / result['sample']
+        match_genes, match_expression = load_sample(match_path)
+
+        # Map to global genes
+        match_global_expr = np.zeros((len(genes), match_expression.shape[1], match_expression.shape[2]))
+        for i, gene in enumerate(match_genes):
+            if gene in gene_map:
+                match_global_expr[gene_map[gene]] = match_expression[i]
+
+        # Extract region around match
+        match_x, match_y = result['x'], result['y']
+        x_min = max(0, match_x - margin)
+        x_max = min(match_global_expr.shape[1], match_x + margin)
+        y_min = max(0, match_y - margin)
+        y_max = min(match_global_expr.shape[2], match_y + margin)
+
+        x_coords_match = []
+        y_coords_match = []
+        expression_vals_match = []
+
+        for x in range(x_min, x_max):
+            for y in range(y_min, y_max):
+                x_coords_match.append(x)
+                y_coords_match.append(y)
+                expression_vals_match.append(match_global_expr[gene_idx, x, y])
+
+        x_coords_match = np.array(x_coords_match)
+        y_coords_match = np.array(y_coords_match)
+        expression_vals_match = np.array(expression_vals_match)
+
+        # Plot match
+        scatter = ax.scatter(x_coords_match, y_coords_match, c=expression_vals_match,
+                           cmap='YlOrRd', s=50, alpha=0.7, edgecolors='black', linewidth=0.5)
+
+        # Mark center
+        ax.scatter([match_x], [match_y], c='blue', s=200, marker='x', linewidths=3)
+
+        # Draw circle
+        circle = plt.Circle((match_x, match_y), radius, color='blue', fill=False, linewidth=2, linestyle='--')
+        ax.add_patch(circle)
+
+        ax.set_title(f'MATCH #{idx+1}\n{result["sample"]}\n({match_x}, {match_y})\nSimilarity: {result["similarity"]:.3f}',
+                    fontsize=10, fontweight='bold')
+        ax.set_xlabel('X coordinate (bins)')
+        ax.set_ylabel('Y coordinate (bins)')
+        ax.set_aspect('equal')
+        ax.grid(True, alpha=0.3)
+        plt.colorbar(scatter, ax=ax, label=f'{gene_name} expression')
+
+        print(f"Match #{idx+1}: {result['sample']} at ({match_x}, {match_y}) - similarity: {result['similarity']:.3f}")
+
+    plt.suptitle(f'Spatial Expression of {gene_name}\n(Original tissue coordinates, blue circle = patch radius)',
+                fontsize=14, fontweight='bold', y=1.02)
+    plt.tight_layout()
+
+    # Save
+    output_file = f'spatial_matches_{gene_name}.png'
+    plt.savefig(output_file, dpi=150, bbox_inches='tight')
+    print(f"\nSaved spatial visualization: {output_file}")
+
+    return output_file
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
@@ -314,6 +464,34 @@ def main():
             print("-"*80)
             print("(Numbers show average gene expression in each ring)")
             print("(Ring 1 = center, Ring 5 = edge)")
+
+    # Visualize spatial data for query and top matches
+    print("\n" + "="*60)
+    print("SPATIAL VISUALIZATION")
+    print("="*60)
+
+    # Use first gene that has non-zero expression in query
+    viz_gene = None
+    for gene_idx in range(min(20, len(genes))):
+        gene_features = query_encoding[gene_idx * N_SHELLS : (gene_idx + 1) * N_SHELLS]
+        if gene_features.sum() > 0.1:  # Has some expression
+            viz_gene = genes[gene_idx]
+            break
+
+    if viz_gene is None:
+        viz_gene = genes[0]  # Fallback to first gene
+
+    visualize_matches_spatial(
+        data_dir=data_dir,
+        query_sample_name=query_sample.name,
+        query_x=query_x,
+        query_y=query_y,
+        results=results,
+        genes=genes,
+        gene_name=viz_gene,
+        radius=RADIUS,
+        n_show=4  # Show query + top 3 matches
+    )
 
     print()
     print("="*60)

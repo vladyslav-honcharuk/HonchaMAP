@@ -50,6 +50,14 @@ Top 10 matches:
  2. GSM7780154 (120, 140)  similarity: 0.952
  3. GSM7780153 ( 80, 100)  similarity: 0.928
 ...
+
+Detailed comparison table showing query vs match gene expression in each ring
+
+Spatial visualization: spatial_matches_GENENAME.png
+  - Shows query + top 3 matches
+  - Original tissue coordinates (not circular)
+  - Gene expression as color
+  - Blue circle = patch radius
 ```
 
 ### 2. `show_gene_pattern.py` - Show what's stored for one gene (126 lines)
