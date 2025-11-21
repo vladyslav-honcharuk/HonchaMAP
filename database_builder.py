@@ -44,7 +44,8 @@ class MultiResolutionDatabaseBuilder:
         pca_dims: int = 256,
         use_variable_genes: bool = True,
         variable_gene_threshold: float = -2.0,
-        batch_size: int = 10000
+        batch_size: int = 10000,
+        use_pca: bool = True
     ):
         """
         Initialize database builder.
@@ -56,13 +57,16 @@ class MultiResolutionDatabaseBuilder:
         n_shells : int
             Number of concentric shells
         pca_dims : int
-            PCA compression dimensions
+            PCA compression dimensions (ignored if use_pca=False)
         use_variable_genes : bool
             Whether to use only spatially variable genes
         variable_gene_threshold : float
             Haystack logpval_adj threshold for variable genes (default: -2.0 for p_adj < 0.01)
         batch_size : int
             Batch size for PCA fitting
+        use_pca : bool
+            Whether to use PCA compression (default: True)
+            Set to False to preserve individual gene information for single-gene searches
         """
         self.output_dir = Path(output_dir)
         self.n_shells = n_shells
@@ -70,6 +74,7 @@ class MultiResolutionDatabaseBuilder:
         self.use_variable_genes = use_variable_genes
         self.variable_gene_threshold = variable_gene_threshold
         self.batch_size = batch_size
+        self.use_pca = use_pca
 
         self.encoder = RadialShellEncoder(n_shells=n_shells)
         self.logger = logging.getLogger(__name__)
@@ -298,6 +303,7 @@ class MultiResolutionDatabaseBuilder:
             'use_variable_genes': self.use_variable_genes,
             'n_shells': self.n_shells,
             'pca_dims': self.pca_dims,
+            'use_pca': self.use_pca,
             'resolution_um': resolution_um
         }
         if global_gene_mask is not None:
@@ -308,18 +314,22 @@ class MultiResolutionDatabaseBuilder:
             json.dump(config, f, indent=2)
         self.logger.info(f"Saved configuration with {len(global_genes)} global genes")
 
-        # Phase 2: Fit PCA
-        self.logger.info("\n[Phase 2/3] Fitting PCA...")
-        pca = self._fit_pca(raw_embeddings_by_radius)
+        # Phase 2 & 3: PCA and Indexing (skip PCA if use_pca=False)
+        pca = None
+        if self.use_pca:
+            self.logger.info("\n[Phase 2/3] Fitting PCA...")
+            pca = self._fit_pca(raw_embeddings_by_radius)
 
-        # Save PCA model
-        pca_path = resolution_dir / f"pca_model_{resolution_um}um.pkl"
-        with open(pca_path, 'wb') as f:
-            pickle.dump(pca, f)
-        self.logger.info(f"Saved PCA model: {pca_path}")
+            # Save PCA model
+            pca_path = resolution_dir / f"pca_model_{resolution_um}um.pkl"
+            with open(pca_path, 'wb') as f:
+                pickle.dump(pca, f)
+            self.logger.info(f"Saved PCA model: {pca_path}")
+        else:
+            self.logger.info("\n[Phase 2/3] Skipping PCA (use_pca=False) - preserving full embeddings")
 
-        # Phase 3: Compress and index
-        self.logger.info("\n[Phase 3/3] Compressing embeddings and building FAISS indices...")
+        # Phase 3: Index embeddings
+        self.logger.info("\n[Phase 3/3] Building FAISS indices...")
         for radius in raw_embeddings_by_radius.keys():
             self._compress_and_index(
                 raw_embeddings_by_radius[radius],
@@ -422,11 +432,14 @@ class MultiResolutionDatabaseBuilder:
                     if global_idx >= 0:  # Gene exists in global set
                         global_z[global_idx] = zarr_np[sample_idx]
 
-                # Generate patches
+                # Generate patches across full grid
+                self.logger.info(f"DEBUG: Sample {sample_id} - Grid shape: {width} × {height}, Non-empty bins: {len(bin_coords)}")
                 patches = patch_generator.generate_patches(
                     bin_coords,
-                    sample_id
+                    sample_id,
+                    grid_shape=(width, height)
                 )
+                self.logger.info(f"DEBUG: Generated {len(patches)} patches for grid {width}×{height}")
 
                 # Compute embeddings for each patch
                 for patch in patches:
@@ -515,19 +528,19 @@ class MultiResolutionDatabaseBuilder:
     def _compress_and_index(
         self,
         embedding_data: Dict,
-        pca: IncrementalPCA,
+        pca: Optional[IncrementalPCA],
         resolution_dir: Path,
         radius: int
     ):
         """
-        Compress embeddings with PCA and build FAISS index.
+        Compress embeddings with PCA (if provided) and build FAISS index.
 
         Parameters:
         -----------
         embedding_data : Dict
             Dictionary with 'embeddings' and 'patch_ids' keys
-        pca : IncrementalPCA
-            Fitted PCA transformer
+        pca : Optional[IncrementalPCA]
+            Fitted PCA transformer, or None to skip compression
         resolution_dir : Path
             Resolution output directory
         radius : int
@@ -539,28 +552,34 @@ class MultiResolutionDatabaseBuilder:
         self.logger.info(f"\n  Radius {radius}:")
         self.logger.info(f"    Original: {embeddings.shape}")
 
-        # Transform with PCA
-        embeddings_compressed = pca.transform(embeddings).astype('float32')
-        self.logger.info(f"    Compressed: {embeddings_compressed.shape}")
+        # Transform with PCA if available
+        if pca is not None:
+            embeddings_final = pca.transform(embeddings).astype('float32')
+            self.logger.info(f"    Compressed: {embeddings_final.shape}")
+            filename_suffix = "compressed"
+        else:
+            embeddings_final = embeddings.astype('float32')
+            self.logger.info(f"    No PCA compression - using full embeddings")
+            filename_suffix = "full"
 
-        # Save compressed embeddings
+        # Save embeddings
         emb_dir = resolution_dir / "embeddings"
         emb_dir.mkdir(exist_ok=True)
-        emb_path = emb_dir / f"embeddings_r{radius}_compressed.h5"
+        emb_path = emb_dir / f"embeddings_r{radius}_{filename_suffix}.h5"
 
         with h5py.File(emb_path, 'w') as f:
-            f.create_dataset('embeddings', data=embeddings_compressed, compression='gzip')
+            f.create_dataset('embeddings', data=embeddings_final, compression='gzip')
             f.create_dataset('patch_ids', data=patch_ids.astype('S'))
 
         self.logger.info(f"    Saved embeddings: {emb_path}")
 
         # Build FAISS index
         # Normalize for inner product (cosine similarity)
-        faiss.normalize_L2(embeddings_compressed)
+        faiss.normalize_L2(embeddings_final)
 
         # Create index
-        index = faiss.IndexFlatIP(embeddings_compressed.shape[1])
-        index.add(embeddings_compressed)
+        index = faiss.IndexFlatIP(embeddings_final.shape[1])
+        index.add(embeddings_final)
 
         # Save index
         index_dir = resolution_dir / "faiss_indices"

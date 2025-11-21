@@ -74,7 +74,8 @@ def build_database(args):
         pca_dims=args.pca_dims,
         use_variable_genes=args.use_variable_genes,
         variable_gene_threshold=args.variable_gene_threshold,
-        batch_size=args.batch_size
+        batch_size=args.batch_size,
+        use_pca=args.use_pca
     )
 
     builder.build_database(samples_by_resolution)
@@ -291,6 +292,10 @@ Examples:
                              help='Haystack logpval_adj threshold for variable genes (default: -2.0 for p_adj<0.01)')
     build_parser.add_argument('--batch-size', type=int, default=10000,
                              help='Batch size for PCA fitting (default: 10000)')
+    build_parser.add_argument('--use-pca',
+                             type=lambda x: x.lower() in ('true', '1', 'yes'),
+                             default=True,
+                             help='Use PCA compression (default: True). Set to False to preserve individual gene info for single-gene searches')
 
     # Search command
     search_parser = subparsers.add_parser('search', help='Search for similar regions')

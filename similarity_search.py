@@ -19,7 +19,7 @@ import logging
 import json
 import zarr
 
-from radial_shell_encoder import (
+from .radial_shell_encoder import (
     RadialShellEncoder,
     PatchGenerator,
     load_variable_genes,
@@ -105,26 +105,34 @@ class MultiResolutionSpatialSearch:
                 f"{len(self.metadata[resolution_um]):,} patches"
             )
 
-        # Load PCA model (once per resolution)
-        if resolution_um not in self.pca_models:
-            pca_path = resolution_dir / f"pca_model_{resolution_um}um.pkl"
-            if not pca_path.exists():
-                raise FileNotFoundError(f"PCA model not found: {pca_path}")
-            with open(pca_path, 'rb') as f:
-                self.pca_models[resolution_um] = pickle.load(f)
-            self.logger.info(f"Loaded PCA model for {resolution_um}μm")
-
-        # Load configuration (once per resolution)
+        # Load configuration (once per resolution) - MUST load config before PCA
         if resolution_um not in self.configs:
             config_path = resolution_dir / "config.json"
             if config_path.exists():
                 with open(config_path, 'r') as f:
                     self.configs[resolution_um] = json.load(f)
                 n_genes = len(self.configs[resolution_um].get('global_genes', []))
-                self.logger.info(f"Loaded config for {resolution_um}μm: {n_genes} global genes")
+                use_pca = self.configs[resolution_um].get('use_pca', True)
+                self.logger.info(f"Loaded config for {resolution_um}μm: {n_genes} global genes, use_pca={use_pca}")
             else:
                 self.logger.warning(f"No config.json found for {resolution_um}μm - using legacy mode")
                 self.configs[resolution_um] = None
+
+        # Load PCA model (once per resolution) - only if config says to use PCA
+        if resolution_um not in self.pca_models:
+            config = self.configs.get(resolution_um, {})
+            use_pca = config.get('use_pca', True) if config else True  # Default to True for legacy
+
+            if use_pca:
+                pca_path = resolution_dir / f"pca_model_{resolution_um}um.pkl"
+                if pca_path.exists():
+                    with open(pca_path, 'rb') as f:
+                        self.pca_models[resolution_um] = pickle.load(f)
+                    self.logger.info(f"Loaded PCA model for {resolution_um}μm")
+                else:
+                    raise FileNotFoundError(f"PCA model not found: {pca_path}")
+            else:
+                self.logger.info(f"Skipping PCA model load for {resolution_um}μm (use_pca=False)")
 
         # Load FAISS index
         index_path = resolution_dir / f"faiss_indices/faiss_r{radius}.index"
@@ -136,14 +144,24 @@ class MultiResolutionSpatialSearch:
             f"{self.indices[key].ntotal:,} vectors"
         )
 
-        # Load embeddings for reference
-        emb_path = resolution_dir / f"embeddings/embeddings_r{radius}_compressed.h5"
-        if emb_path.exists():
-            with h5py.File(emb_path, 'r') as f:
+        # Load embeddings for reference (check both compressed and full)
+        emb_path_compressed = resolution_dir / f"embeddings/embeddings_r{radius}_compressed.h5"
+        emb_path_full = resolution_dir / f"embeddings/embeddings_r{radius}_full.h5"
+
+        if emb_path_compressed.exists():
+            with h5py.File(emb_path_compressed, 'r') as f:
                 self.embeddings[key] = {
                     'embeddings': f['embeddings'][:],
                     'patch_ids': [pid.decode() for pid in f['patch_ids'][:]]
                 }
+        elif emb_path_full.exists():
+            with h5py.File(emb_path_full, 'r') as f:
+                self.embeddings[key] = {
+                    'embeddings': f['embeddings'][:],
+                    'patch_ids': [pid.decode() for pid in f['patch_ids'][:]]
+                }
+        else:
+            self.logger.warning(f"No embeddings file found for r{radius}")
 
     def _encode_query_global(
         self,
@@ -243,7 +261,8 @@ class MultiResolutionSpatialSearch:
         k: int = 100,
         min_bins: Optional[int] = None,
         max_bins: Optional[int] = None,
-        bin_size: Optional[int] = None
+        bin_size: Optional[int] = None,
+        gene_id: Optional[Union[int, str]] = None
     ) -> pd.DataFrame:
         """
         Search for similar regions using spatial coordinates.
@@ -264,6 +283,9 @@ class MultiResolutionSpatialSearch:
             Filter results by number of bins
         bin_size : int, optional
             Bin size for zarr file (default: same as resolution)
+        gene_id : int or str, optional
+            Gene index or name to search for. If provided, searches only
+            for patterns of this specific gene. If None, searches across all genes.
 
         Returns:
         --------
@@ -274,13 +296,16 @@ class MultiResolutionSpatialSearch:
         if bin_size is None:
             bin_size = resolution_um
 
-        # Convert physical radius to bin units
+        # Convert physical coordinates to bin units
+        x_center_bins = x_center / bin_size
+        y_center_bins = y_center / bin_size
         radius_bins = int(radius_physical / resolution_um)
 
         self.logger.info(f"\n{'='*60}")
         self.logger.info(f"SPATIAL PATTERN SEARCH ({resolution_um}μm)")
         self.logger.info(f"{'='*60}")
-        self.logger.info(f"Query center: ({x_center}, {y_center})")
+        self.logger.info(f"Query center (physical): ({x_center:.1f}, {y_center:.1f}) μm")
+        self.logger.info(f"Query center (bins): ({x_center_bins:.1f}, {y_center_bins:.1f})")
         self.logger.info(f"Query radius: {radius_physical}μm ({radius_bins} bins)")
 
         # Load sample data
@@ -299,9 +324,9 @@ class MultiResolutionSpatialSearch:
             indexing='ij'
         )
 
-        # Calculate distances from center
+        # Calculate distances from center (using bin coordinates)
         distances = np.sqrt(
-            (x_indices - x_center)**2 + (y_indices - y_center)**2
+            (x_indices - x_center_bins)**2 + (y_indices - y_center_bins)**2
         )
         in_radius = distances <= radius_bins
 
@@ -342,7 +367,8 @@ class MultiResolutionSpatialSearch:
             search_radius,
             k,
             min_bins,
-            max_bins
+            max_bins,
+            gene_id
         )
 
     def search_from_selection(
@@ -353,7 +379,8 @@ class MultiResolutionSpatialSearch:
         k: int = 100,
         min_bins: Optional[int] = None,
         max_bins: Optional[int] = None,
-        bin_size: Optional[int] = None
+        bin_size: Optional[int] = None,
+        gene_id: Optional[Union[int, str]] = None
     ) -> pd.DataFrame:
         """
         Search for similar regions using selection bounds (box or lasso).
@@ -462,7 +489,8 @@ class MultiResolutionSpatialSearch:
             search_radius,
             k,
             min_bins,
-            max_bins
+            max_bins,
+            gene_id
         )
 
     def _search_with_embedding(
@@ -472,7 +500,8 @@ class MultiResolutionSpatialSearch:
         radius: int,
         k: int,
         min_bins: Optional[int],
-        max_bins: Optional[int]
+        max_bins: Optional[int],
+        gene_id: Optional[Union[int, str]] = None
     ) -> pd.DataFrame:
         """
         Perform search with pre-computed embedding.
@@ -497,18 +526,87 @@ class MultiResolutionSpatialSearch:
         # Load data for this resolution/radius
         self._load_resolution(resolution_um, radius)
 
-        # Transform with PCA
-        self.logger.info("[2/4] Transforming with PCA...")
-        pca = self.pca_models[resolution_um]
-        query_compressed = pca.transform(
-            query_embedding.reshape(1, -1)
-        ).astype('float32')
-        faiss.normalize_L2(query_compressed)
+        # Get configuration for this resolution
+        config = self.configs.get(resolution_um, {})
+        use_pca = config.get('use_pca', True)  # Default to True for backward compatibility
+
+        # Handle single-gene search
+        gene_idx = None
+        if gene_id is not None:
+            self.logger.info(f"[2/4] Extracting single gene embedding (gene_id={gene_id})...")
+
+            # Get gene index
+            if isinstance(gene_id, str):
+                # Gene name provided - find its index
+                global_genes = config.get('global_genes', [])
+                if gene_id not in global_genes:
+                    raise ValueError(f"Gene '{gene_id}' not found in global gene list")
+                gene_idx = global_genes.index(gene_id)
+                self.logger.info(f"Gene '{gene_id}' -> index {gene_idx}")
+            else:
+                # Gene index provided
+                gene_idx = gene_id
+
+            # Extract only the shells for this gene
+            # Embedding format: [gene0_shell0, gene0_shell1, ..., gene0_shell4, gene1_shell0, ...]
+            # For n_shells=5, gene i occupies indices [i*5:(i+1)*5]
+            n_shells = config.get('n_shells', 5)
+            start_idx = gene_idx * n_shells
+            end_idx = start_idx + n_shells
+            query_gene_embedding = query_embedding[start_idx:end_idx]
+
+            self.logger.info(f"Gene index: {gene_idx}, shells extracted: {start_idx}:{end_idx}")
+        else:
+            # Use full embedding
+            query_gene_embedding = query_embedding
+
+        # Transform with PCA if database uses it
+        if use_pca and resolution_um in self.pca_models:
+            self.logger.info("[2.5/4] Transforming with PCA...")
+            pca = self.pca_models[resolution_um]
+            query_compressed = pca.transform(
+                query_gene_embedding.reshape(1, -1)
+            ).astype('float32')
+            faiss.normalize_L2(query_compressed)
+        else:
+            # No PCA - use raw embedding
+            if gene_id is not None:
+                self.logger.info("[2.5/4] Using single-gene embedding (no PCA)...")
+            else:
+                self.logger.info("[2.5/4] Using full embedding (no PCA)...")
+            query_compressed = query_gene_embedding.reshape(1, -1).astype('float32')
+            faiss.normalize_L2(query_compressed)
 
         # Search
         self.logger.info(f"[3/4] Searching...")
         key = (resolution_um, radius)
-        similarities, indices = self.indices[key].search(query_compressed, k * 2)
+
+        # For single-gene search, need to extract gene embeddings from stored data
+        if gene_id is not None and key in self.embeddings:
+            self.logger.info(f"Building temporary single-gene index for gene {gene_idx}...")
+
+            # Get stored embeddings
+            stored_embeddings = self.embeddings[key]['embeddings']  # shape: (n_patches, n_genes * n_shells)
+
+            # Extract gene-specific embeddings
+            n_shells = config.get('n_shells', 5)
+            start_idx = gene_idx * n_shells
+            end_idx = start_idx + n_shells
+            gene_embeddings = stored_embeddings[:, start_idx:end_idx].astype('float32')
+
+            # Normalize
+            faiss.normalize_L2(gene_embeddings)
+
+            # Create temporary index
+            temp_index = faiss.IndexFlatIP(gene_embeddings.shape[1])
+            temp_index.add(gene_embeddings)
+
+            # Search using temporary index
+            similarities, indices = temp_index.search(query_compressed, k * 2)
+            self.logger.info(f"Searched {temp_index.ntotal} patches for gene {gene_id}")
+        else:
+            # Normal search using pre-built index
+            similarities, indices = self.indices[key].search(query_compressed, k * 2)
 
         # Retrieve metadata
         self.logger.info("[4/4] Retrieving results...")
